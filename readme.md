@@ -66,6 +66,20 @@ node <工具名>.js   # 运行某个工具
 
 - **示例**：`node findequ.js ~/Downloads`
 
+### mvequ
+
+- **作用**：读取 `findequ` 的结果 JSON，对每组重复文件（同一 MD5、count > 1），保留第一个文件在原处，其余的按相对路径**移动**（非复制）到目标目录，保持原有目录结构。
+- **启动方式**：`node mvequ.js <findequ-result.json> <目标目录>`
+- **启动参数**：
+
+| 参数 | 说明 |
+| --- | --- |
+| `<findequ-result.json>` | `findequ` 输出的结果文件路径（必填） |
+| `<目标目录>` | 重复文件移动到的目标目录（必填） |
+
+- **行为说明**：源文件不存在或目标位置已存在同名文件时跳过并警告；跨设备移动失败时自动退化为复制后删除源文件。
+- **示例**：`node mvequ.js findequ-result-123.json /data/dup-out`
+
 ---
 
 > 新增工具：在根目录新建 `<name>.ts`，如需要配置则在 `config/` 下新建 `<name>.yaml`，使用 `lib/config.ts` 中的 `loadConfig()` 加载配置，然后 `npm run build` 编译运行。

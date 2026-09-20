@@ -32,7 +32,14 @@ const config = loadConfig<NameConfig>('name');
 
 2. 如需配置，在 `config/` 新建 `<name>.yaml`，用 `loadConfig<NameConfig>('name')` 加载（文件不存在时返回 `null`）。
 3. `npm run build` 编译，`node <name>.js` 运行。
-4. **更新 `readme.md`**：在"工具列表"中加入新工具的介绍，包括作用、启动方式、启动参数、配置项表（如有）、输出说明。
+
+## readme 同步规则
+
+**每次新增、修改或删除一个工具命令，都必须同步更新 `readme.md` 的"工具列表"**：
+
+- 新增：加入该工具的介绍，包括作用、启动方式、启动参数、配置项表（如有）、输出说明。
+- 修改：若行为、参数、配置项发生变化，同步更新对应描述。
+- 删除：移除对应章节。
 
 ## Git 提交规则
 
