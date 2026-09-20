@@ -35,9 +35,12 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 /**
- * mvflat 工具：递归把源目录下所有文件移动到目标目录，不保留相对路径（拍平）。
+ * mvflat 工具：递归把源目录下指定扩展名的文件移动到目标目录，不保留相对路径（拍平）。
  *
- * 用法：node mvflat.js <源目录> <目标目录>
+ * 用法：node mvflat.js <源目录> <目标目录> <扩展名>
+ *
+ * <扩展名> 只匹配文件名最后一个点之后的部分（大小写不敏感，可带或不带前导点，如 mp3 / .mp3）；
+ * 传 * 表示不筛选，移动所有文件（包括没有扩展名的文件）。
  *
  * 若目标目录已存在同名文件（重名冲突），参照 renametag 的做法：在扩展名前插入一个编号再试，
  * 编号从 1 开始，每使用一次（无论是否成功）就 +1，在本次运行中递增、不会重复使用，
@@ -77,9 +80,9 @@ function splitExt(name) {
     return idx <= 0 ? [name, ''] : [name.slice(0, idx), name.slice(idx + 1)];
 }
 function main() {
-    const [, , source, target] = process.argv;
-    if (!source || !target) {
-        console.error('用法: node mvflat.js <源目录> <目标目录>');
+    const [, , source, target, ext] = process.argv;
+    if (!source || !target || !ext) {
+        console.error('用法: node mvflat.js <源目录> <目标目录> <扩展名（如 mp3，* 表示全部）>');
         process.exit(1);
     }
     const absSource = path.resolve(source);
@@ -93,7 +96,15 @@ function main() {
         process.exit(1);
     }
     fs.mkdirSync(absTarget, { recursive: true });
-    const files = listFiles(absSource);
+    const normExt = ext === '*' ? '*' : (ext.startsWith('.') ? ext.slice(1) : ext).toLowerCase();
+    const matchExt = (base) => {
+        if (normExt === '*') {
+            return true;
+        }
+        const [, fileExt] = splitExt(base);
+        return fileExt.toLowerCase() === normExt;
+    };
+    const files = listFiles(absSource).filter((file) => matchExt(path.basename(file)));
     const moved = [];
     const skipped = [];
     let dupCounter = 1; // 冲突编号：本次运行内递增，用过的编号不会再用
@@ -105,9 +116,9 @@ function main() {
             continue; // 已经在目标目录下的正确位置，无需移动
         }
         if (fs.existsSync(destPath)) {
-            const [nameNoExt, ext] = splitExt(base);
+            const [nameNoExt, fileExt] = splitExt(base);
             do {
-                const numbered = ext ? `${nameNoExt}.${dupCounter++}.${ext}` : `${nameNoExt}.${dupCounter++}`;
+                const numbered = fileExt ? `${nameNoExt}.${dupCounter++}.${fileExt}` : `${nameNoExt}.${dupCounter++}`;
                 destPath = path.join(absTarget, numbered);
             } while (fs.existsSync(destPath));
         }
@@ -139,6 +150,7 @@ function main() {
     const result = {
         source: absSource,
         target: absTarget,
+        ext: normExt,
         moved,
         skipped,
         total: { movedCount: moved.length, skippedCount: skipped.length },
