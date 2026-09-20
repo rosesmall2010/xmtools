@@ -38,7 +38,7 @@ const config = loadConfig<NameConfig>('name');
 
 - 提交作者**固定使用 `rosesmall2010`**（`rosesmall2010@gmail.com`），不要使用其他用户身份。
 - 提交前清理运行产物（如 `findequ-result-*.json`），不要提交进仓库。
-- commit message 末尾附上归因行：`Co-Authored-By: Claude Code <noreply@anthropic.com>`
+- commit message **不要**附加 `Co-Authored-By` 之类的归因行。
 
 ## 常用命令
 
