@@ -32,6 +32,13 @@ const config = loadConfig<NameConfig>('name');
 
 2. 如需配置，在 `config/` 新建 `<name>.yaml`，用 `loadConfig<NameConfig>('name')` 加载（文件不存在时返回 `null`）。
 3. `npm run build` 编译，`node <name>.js` 运行。
+4. **更新 `readme.md`**：在"工具列表"中加入新工具的介绍，包括作用、启动方式、启动参数、配置项表（如有）、输出说明。
+
+## Git 提交规则
+
+- 提交作者**固定使用 `rosesmall2010`**（`rosesmall2010@gmail.com`），不要使用其他用户身份。
+- 提交前清理运行产物（如 `findequ-result-*.json`），不要提交进仓库。
+- commit message 末尾附上归因行：`Co-Authored-By: Claude Code <noreply@anthropic.com>`
 
 ## 常用命令
 
