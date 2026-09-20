@@ -32,12 +32,15 @@ function formatSize(bytes: number): string {
     return utils.formatMemory(bytes);
 }
 
-/** 将毫秒格式化为 mm:ss */
+/** 将毫秒格式化为 天 时:分:秒（不满一天时省略"天"） */
 function formatDuration(ms: number): string {
     const totalSec = Math.max(0, Math.round(ms / 1000));
-    const m = Math.floor(totalSec / 60);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
     const s = totalSec % 60;
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    const hms = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return d > 0 ? `${d}天 ${hms}` : hms;
 }
 
 /** 渲染一个固定宽度的进度条，如 [██████░░░░] */
