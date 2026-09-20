@@ -29,8 +29,8 @@ interface RenameTagResult {
  */
 function computeRenamed(filename: string): string | null {
     const parts = filename.split('.');
-    if (parts.length < 2) {
-        return null; // 没有扩展名，不处理
+    if (parts.length < 2 || parts.some((p) => p.length === 0)) {
+        return null; // 没有扩展名，或存在连续点产生的空segment（如 "123..mp3"），不处理
     }
     const ext = parts[parts.length - 1];
     const first = parts[0];
