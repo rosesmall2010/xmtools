@@ -46,8 +46,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *   若数字后紧跟的就是扩展名（如 12345.mp3，只有"数字.扩展名"两段），不处理。
  * - 3D / 3 D 前缀：直接附着在文件名开头（无需用点分隔，如 3DAAA.mp3），把该前缀移到扩展名前：
  *   3DAAA.mp3 => AAA.3D.mp3。
- * - 连字符规范化：文件名中的 "-" 前面或后面（或前后都）没有空格时，统一改成 " - "（多个空格也收敛成一个）：
- *   张三-AAA.mp3 => 张三 - AAA.mp3。
+ * - 连字符规范化：连续多个 "-"（中间可有空格，如 "- -"）先合并成一个 "-"，再统一改成 " - "：
+ *   张三-AAA.mp3 => 张三 - AAA.mp3；张三- -AAA.mp3 => 张三 - AAA.mp3。
  * - 改名冲突处理：若改名后的目标文件名已存在，在扩展名前插入一个编号再试。编号从 1 开始，
  *   每使用一次（无论是否成功）就 +1，在本次运行中递增、不会重复使用：
  *   张三 - AAA.mp3 已存在 => 张三 - AAA.9.mp3，仍冲突则用 10、11……直到不冲突为止。
@@ -78,8 +78,9 @@ function computeRenamed(filename) {
         const tagMatch = first.match(/^(3\s?D)(.+)$/i);
         nameParts = tagMatch ? [tagMatch[2], ...middle, tagMatch[1]] : [first, ...middle];
     }
-    // 连字符规范化：'-' 前后没有恰好一个空格时统一改成 " - "；连续多个 '-' 逐个替换后再收敛多余空格
-    const normalizedParts = nameParts.map((p) => p.replace(/\s*-\s*/g, ' - ').replace(/ {2,}/g, ' '));
+    // 连字符规范化：连续多个 '-'（中间可有空格，如 "- -"）先合并成一个 '-'，
+    // 再统一把 '-' 前后没有恰好一个空格的情况改成 " - "
+    const normalizedParts = nameParts.map((p) => p.replace(/-(?:\s*-)+/g, '-').replace(/\s*-\s*/g, ' - '));
     const newName = [...normalizedParts, ext].join('.');
     return newName === filename ? null : newName;
 }
