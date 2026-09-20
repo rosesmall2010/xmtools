@@ -68,8 +68,8 @@ function main() {
     }
     const sourceRoot = result.path;
     const absTarget = path.resolve(targetDir);
-    let movedCount = 0;
-    let skippedCount = 0;
+    const moved = [];
+    const skipped = [];
     for (const md5 of Object.keys(result.file)) {
         const { paths } = result.file[md5];
         if (paths.length <= 1) {
@@ -81,12 +81,12 @@ function main() {
             const dest = path.join(absTarget, relPath);
             if (!fs.existsSync(src)) {
                 console.warn(`跳过（源文件不存在）: ${relPath}`);
-                skippedCount++;
+                skipped.push({ path: relPath, reason: '源文件不存在' });
                 continue;
             }
             if (fs.existsSync(dest)) {
                 console.warn(`跳过（目标已存在）: ${relPath}`);
-                skippedCount++;
+                skipped.push({ path: relPath, reason: '目标已存在' });
                 continue;
             }
             fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -101,14 +101,23 @@ function main() {
                 }
                 else {
                     console.warn(`跳过（移动失败）: ${relPath} (${err.message})`);
-                    skippedCount++;
+                    skipped.push({ path: relPath, reason: `移动失败: ${err.message}` });
                     continue;
                 }
             }
             console.log(`已移动: ${relPath}`);
-            movedCount++;
+            moved.push(relPath);
         }
     }
-    console.log(`完成，共移动 ${movedCount} 个文件，跳过 ${skippedCount} 个。`);
+    const mvResult = {
+        source: sourceRoot,
+        target: absTarget,
+        moved,
+        skipped,
+        total: { movedCount: moved.length, skippedCount: skipped.length },
+    };
+    const outFile = path.resolve(`mvequ-result-${Date.now()}.json`);
+    fs.writeFileSync(outFile, JSON.stringify(mvResult, null, 2), 'utf8');
+    console.log(`处理完成，共移动 ${moved.length} 个，跳过 ${skipped.length} 个，结果已保存到: ${outFile}`);
 }
 main();

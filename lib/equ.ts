@@ -9,3 +9,14 @@ export interface FindEquResult {
         md5Count: number;
     };
 }
+
+export interface MvEquResult {
+    source: string;
+    target: string;
+    moved: string[];
+    skipped: Array<{ path: string; reason: string }>;
+    total: {
+        movedCount: number;
+        skippedCount: number;
+    };
+}

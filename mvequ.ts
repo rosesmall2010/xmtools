@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { FindEquResult } from './lib/equ';
+import { FindEquResult, MvEquResult } from './lib/equ';
 
 /**
  * 这里要实现一个命令行工具，把findequ.ts的结果，对于重复的文件，保持相对路径，移动到指定的目录下
@@ -37,8 +37,8 @@ function main(): void {
     const sourceRoot = result.path;
     const absTarget = path.resolve(targetDir);
 
-    let movedCount = 0;
-    let skippedCount = 0;
+    const moved: string[] = [];
+    const skipped: Array<{ path: string; reason: string }> = [];
 
     for (const md5 of Object.keys(result.file)) {
         const { paths } = result.file[md5];
@@ -52,12 +52,12 @@ function main(): void {
 
             if (!fs.existsSync(src)) {
                 console.warn(`跳过（源文件不存在）: ${relPath}`);
-                skippedCount++;
+                skipped.push({ path: relPath, reason: '源文件不存在' });
                 continue;
             }
             if (fs.existsSync(dest)) {
                 console.warn(`跳过（目标已存在）: ${relPath}`);
-                skippedCount++;
+                skipped.push({ path: relPath, reason: '目标已存在' });
                 continue;
             }
 
@@ -71,16 +71,25 @@ function main(): void {
                     fs.unlinkSync(src);
                 } else {
                     console.warn(`跳过（移动失败）: ${relPath} (${(err as Error).message})`);
-                    skippedCount++;
+                    skipped.push({ path: relPath, reason: `移动失败: ${(err as Error).message}` });
                     continue;
                 }
             }
             console.log(`已移动: ${relPath}`);
-            movedCount++;
+            moved.push(relPath);
         }
     }
 
-    console.log(`完成，共移动 ${movedCount} 个文件，跳过 ${skippedCount} 个。`);
+    const mvResult: MvEquResult = {
+        source: sourceRoot,
+        target: absTarget,
+        moved,
+        skipped,
+        total: { movedCount: moved.length, skippedCount: skipped.length },
+    };
+    const outFile = path.resolve(`mvequ-result-${Date.now()}.json`);
+    fs.writeFileSync(outFile, JSON.stringify(mvResult, null, 2), 'utf8');
+    console.log(`处理完成，共移动 ${moved.length} 个，跳过 ${skipped.length} 个，结果已保存到: ${outFile}`);
 }
 
 main();
