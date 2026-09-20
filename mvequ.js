@@ -44,13 +44,28 @@ const path = __importStar(require("node:path"));
  *
  * 每组重复文件（同一 md5，count > 1）保留第一个文件在原处，其余的移动到目标目录。
  */
-async function main() {
+function main() {
     const [, , resultFile, targetDir] = process.argv;
     if (!resultFile || !targetDir) {
         console.error('用法: node mvequ.js <findequ-result.json> <目标目录>');
         process.exit(1);
     }
-    const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+    if (!fs.existsSync(resultFile)) {
+        console.error(`错误: 结果文件不存在: ${resultFile}`);
+        process.exit(1);
+    }
+    let result;
+    try {
+        result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+    }
+    catch (err) {
+        console.error(`错误: 结果文件不是合法的 JSON: ${resultFile} (${err.message})`);
+        process.exit(1);
+    }
+    if (!result.path || !result.file) {
+        console.error(`错误: 结果文件格式不正确，缺少 path 或 file 字段: ${resultFile}`);
+        process.exit(1);
+    }
     const sourceRoot = result.path;
     const absTarget = path.resolve(targetDir);
     let movedCount = 0;
