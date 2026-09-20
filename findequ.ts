@@ -23,18 +23,9 @@ import { utils } from 'xmcommon';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { FindEquResult } from './lib/equ';
 
-interface FindEquResult {
-    path: string;
-    file: Record<string, { size: String; count: number; paths: string[] }>;
-    total: {
-        fileCount: number;
-        totalSize: String;
-        duplicateCount: number;
-        duplicateSize: String;
-        md5Count: number;
-    };
-}
+
 
 /** 将字节数格式化为可读字符串 */
 function formatSize(bytes: number): string {
