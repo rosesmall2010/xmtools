@@ -35,24 +35,30 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 /**
- * renametag 工具：修正文件名——把开头的"数字前缀"或"3D / 3 D 前缀"移动到扩展名之前。
+ * renametag 工具：修正文件名——把开头的"数字前缀"或"3D / 3 D 前缀"移动到扩展名之前，
+ * 并规范化文件名中连字符 "-" 前后的空格。
  *
  * 用法：node renametag.js <目录路径>
  *
- * 处理规则：
+ * 处理规则（均只作用于文件名本身，不含路径、不含扩展名）：
  * - 数字前缀：文件名以数字开头、以点分隔（如 13456.AAA.mp3），且数字后面除扩展名外还有内容时，
  *   把数字移到扩展名前：13456.AAA.mp3 => AAA.13456.mp3。
  *   若数字后紧跟的就是扩展名（如 12345.mp3，只有"数字.扩展名"两段），不处理。
  * - 3D / 3 D 前缀：直接附着在文件名开头（无需用点分隔，如 3DAAA.mp3），把该前缀移到扩展名前：
  *   3DAAA.mp3 => AAA.3D.mp3。
+ * - 连字符规范化：文件名中的 "-" 前面或后面（或前后都）没有空格时，统一改成 " - "（多个空格也收敛成一个）：
+ *   张三-AAA.mp3 => 张三 - AAA.mp3。
+ * - 改名冲突处理：若改名后的目标文件名已存在，在扩展名前插入一个编号再试。编号从 1 开始，
+ *   每使用一次（无论是否成功）就 +1，在本次运行中递增、不会重复使用：
+ *   张三 - AAA.mp3 已存在 => 张三 - AAA.9.mp3，仍冲突则用 10、11……直到不冲突为止。
  *
  * 递归扫描目录下所有文件，处理结果保存到 renametag-result-<时间戳>.json。
  */
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 /**
- * 计算文件名去除数字/3D 前缀、并把前缀移到扩展名前后的新文件名。
- * 不匹配任何规则时返回 null（保持原名）。
+ * 计算文件名调整数字/3D 前缀位置、规范化连字符空格后的新文件名。
+ * 无需任何调整时返回 null（保持原名）。
  */
 function computeRenamed(filename) {
     const parts = filename.split('.');
@@ -62,19 +68,25 @@ function computeRenamed(filename) {
     const ext = parts[parts.length - 1];
     const first = parts[0];
     const middle = parts.slice(1, -1);
+    let nameParts;
     if (/^\d+$/.test(first)) {
-        if (middle.length === 0) {
-            return null; // 仅"数字.扩展名"，不处理
-        }
-        return [...middle, first, ext].join('.');
+        // 数字前缀：数字后除扩展名外还有内容时才移到末尾，仅"数字.扩展名"保持原样
+        nameParts = middle.length === 0 ? [first] : [...middle, first];
     }
-    // ponytail: 只处理 "3D"/"3 D" 紧贴文件名开头且后面还有内容的情况，如 "3D.AAA.mp3"（点分隔）未覆盖
-    const tagMatch = first.match(/^(3\s?D)(.+)$/i);
-    if (tagMatch) {
-        const [, tag, rest] = tagMatch;
-        return [rest, ...middle, tag, ext].join('.');
+    else {
+        // ponytail: 只处理 "3D"/"3 D" 紧贴文件名开头且后面还有内容的情况，如 "3D.AAA.mp3"（点分隔）未覆盖
+        const tagMatch = first.match(/^(3\s?D)(.+)$/i);
+        nameParts = tagMatch ? [tagMatch[2], ...middle, tagMatch[1]] : [first, ...middle];
     }
-    return null;
+    // 连字符规范化：'-' 前后没有恰好一个空格时统一改成 " - "；连续多个 '-' 逐个替换后再收敛多余空格
+    const normalizedParts = nameParts.map((p) => p.replace(/\s*-\s*/g, ' - ').replace(/ {2,}/g, ' '));
+    const newName = [...normalizedParts, ext].join('.');
+    return newName === filename ? null : newName;
+}
+/** 按最后一个点拆分文件名为 [不含扩展名部分, 扩展名] */
+function splitExt(name) {
+    const idx = name.lastIndexOf('.');
+    return [name.slice(0, idx), name.slice(idx + 1)];
 }
 /** 递归收集目录下所有文件的绝对路径 */
 function listFiles(root) {
@@ -116,6 +128,7 @@ function main() {
     const files = listFiles(absTarget);
     const renamed = [];
     const skipped = [];
+    let dupCounter = 1; // 冲突编号：本次运行内递增，用过的编号不会再用
     for (const file of files) {
         const base = path.basename(file);
         const newBase = computeRenamed(base);
@@ -123,13 +136,15 @@ function main() {
             continue;
         }
         const relFrom = path.relative(absTarget, file);
-        const newPath = path.join(path.dirname(file), newBase);
-        const relTo = path.relative(absTarget, newPath);
+        const dir = path.dirname(file);
+        let newPath = path.join(dir, newBase);
         if (fs.existsSync(newPath)) {
-            console.warn(`跳过（目标文件名已存在）: ${relFrom} -> ${relTo}`);
-            skipped.push({ path: relFrom, reason: '目标文件名已存在' });
-            continue;
+            const [nameNoExt, ext] = splitExt(newBase);
+            do {
+                newPath = path.join(dir, `${nameNoExt}.${dupCounter++}.${ext}`);
+            } while (fs.existsSync(newPath));
         }
+        const relTo = path.relative(absTarget, newPath);
         try {
             fs.renameSync(file, newPath);
         }
