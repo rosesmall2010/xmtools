@@ -1,0 +1,523 @@
+#!/usr/bin/env node
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+/**
+ * mp3info 工具：递归扫描目录下所有 .mp3 文件，提取 ID3 标签与音频参数。
+ *
+ * 用法：node mp3info.js <目录路径>
+ *
+ * 提取的信息：
+ * - 文件：文件名、相对路径、文件大小
+ * - ID3 标签：歌手、歌曲名、专辑、年份、流派（每个字段最多保留 50 个字符，超出截取）
+ * - 音频参数：码率、时长、采样率、声道（单声道/立体声等）
+ *
+ * 编码检测：ID3v2 文本帧带一个编码字节（0=ISO-8859-1、1=UTF-16 带 BOM、2=UTF-16BE、3=UTF-8），
+ * 但历史上大量中文标签虽然声明 0（ISO-8859-1），实际写入的是 GBK/GB2312 字节。
+ * 因此对非 ASCII 内容：先按严格 UTF-8 解码，失败则按 GB18030（兼容 GBK/GB2312）解码。
+ * 实测 GBK 中文文本恰好构成合法 UTF-8 的概率约 0（6 个汉字时 < 0.0001%），该判定可靠。
+ *
+ * ID3v1 兜底：无 ID3v2 标签时读取文件末尾 128 字节的 TAG 块（按 GB18030 解码）。
+ */
+const fs = __importStar(require("node:fs"));
+const path = __importStar(require("node:path"));
+const xmcommon_1 = require("xmcommon");
+/** 每个 ID3 文本字段最多保留的字符数 */
+const MAX_FIELD_CHARS = 50;
+/** ID3v2.2 的 3 字符帧 ID → ID3v2.3/2.4 的 4 字符 ID（只列本工具用到的字段） */
+const V22_FRAME_IDS = {
+    TT2: 'TIT2',
+    TP1: 'TPE1',
+    TAL: 'TALB',
+    TYE: 'TYER',
+    TCO: 'TCON',
+    TXX: 'TXXX',
+    COM: 'COMM',
+};
+/** 缓存的严格 UTF-8/GB18030 解码器（fatal 模式：无法解码时抛错，用于判定编码） */
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+const gb18030 = new TextDecoder('gb18030');
+/**
+ * 解码一段 ID3 文本：优先严格 UTF-8，失败则退回 GB18030（兼容 GBK/GB2312）。
+ * ponytail: 单个汉字有约 9% 概率恰好是合法 UTF-8，可能解出乱码；
+ *            真实多字文本概率约 0，不值得为此引入编码检测库。
+ */
+function decodeText(buf) {
+    const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    try {
+        return strictUtf8.decode(bytes);
+    }
+    catch {
+        return gb18030.decode(bytes);
+    }
+}
+/** 按 ID3v2 的编码字节解码帧内容（已去掉首字节编码标识） */
+function decodeFrameText(encoding, body) {
+    if (encoding === 1) {
+        // UTF-16 带 BOM：BOM 决定字节序，无 BOM 时按 LE 处理（Node 的 utf-16le 为默认实现）
+        if (body.length >= 2 && body[0] === 0xfe && body[1] === 0xff) {
+            return body.subarray(2).swap16().toString('utf16le');
+        }
+        if (body.length >= 2 && body[0] === 0xff && body[1] === 0xfe) {
+            return body.subarray(2).toString('utf16le');
+        }
+        return body.toString('utf16le');
+    }
+    if (encoding === 2) {
+        return body.swap16().toString('utf16le');
+    }
+    if (encoding === 3) {
+        return decodeText(body);
+    }
+    // encoding 0（含历史遗留的 GBK 误标）：走 UTF-8/GB18030 探测
+    return decodeText(body);
+}
+/** 去掉尾部填充的 0 字节与首尾空白 */
+function tidy(text) {
+    return sanitize(text.replace(/\u0000+$/, '').trim());
+}
+/** 部分老打标工具在字段为空时会写入字面文本 "null"/"undefined"，视为无效值 */
+function sanitize(text) {
+    return /^(null|undefined)$/i.test(text) ? '' : text;
+}
+/** 超过 MAX_FIELD_CHARS 个字符时截取（按字符数，非字节数） */
+function truncate(text) {
+    return text.length > MAX_FIELD_CHARS ? text.slice(0, MAX_FIELD_CHARS) : text;
+}
+/** 读取 ID3v2 标签，返回 标签帧 Map 与音频数据起始偏移 (audioStart) */
+function readId3v2(buf) {
+    const tags = new Map();
+    if (buf.length < 10 || buf.toString('latin1', 0, 3) !== 'ID3') {
+        return { tags, audioStart: 0, hasV2: false };
+    }
+    const major = buf[3];
+    const flags = buf[5];
+    const synchsafe = (o) => ((buf[o] & 0x7f) << 21) | ((buf[o + 1] & 0x7f) << 14) | ((buf[o + 2] & 0x7f) << 7) | (buf[o + 3] & 0x7f);
+    let tagSize = synchsafe(6);
+    let tagEnd = Math.min(10 + tagSize, buf.length);
+    // 整个标签做了非同步处理：0xFF 0x00 还原为 0xFF
+    if (flags & 0x80) {
+        const start = 10;
+        const out = Buffer.alloc(tagEnd - start);
+        let w = 0;
+        for (let r = start; r < tagEnd; r++) {
+            out[w++] = buf[r];
+            if (buf[r] === 0xff && buf[r + 1] === 0x00) {
+                r++;
+            }
+        }
+        // 去同步后标签变短，重新拼成 [头部 + 去同步后的标签][音频数据]
+        tagEnd = start + w;
+        tagSize = w;
+        buf = Buffer.concat([buf.subarray(0, start), out.subarray(0, w), buf.subarray(start + synchsafe(6))]);
+    }
+    // 扩展头时跳过（v2.3 为 4 字节长度，v2.4 为 4 字节 synchsafe 长度）
+    let pos = 10;
+    if (flags & 0x40) {
+        if (pos + 4 <= tagEnd) {
+            const extSize = major >= 4 ? synchsafe(pos) : buf.readUInt32BE(pos);
+            pos += major >= 4 ? extSize : extSize + 4;
+        }
+    }
+    const idLen = major <= 2 ? 3 : 4;
+    const headerLen = major <= 2 ? 6 : 10;
+    while (pos + headerLen <= Math.min(10 + tagSize, buf.length)) {
+        const rawId = buf.toString('latin1', pos, pos + idLen);
+        if (!/^[A-Z0-9]{3,4}$/.test(rawId)) {
+            break; // 帧区域结束（遇到填充 0 或音频数据）
+        }
+        const id = major <= 2 ? (V22_FRAME_IDS[rawId] ?? rawId) : rawId;
+        let frameSize;
+        let frameFlags = 0;
+        if (major <= 2) {
+            frameSize = (buf[pos + 3] << 16) | (buf[pos + 4] << 8) | buf[pos + 5];
+        }
+        else if (major === 3) {
+            frameSize = buf.readUInt32BE(pos + 4);
+            frameFlags = buf.readUInt16BE(pos + 8);
+        }
+        else {
+            frameSize = synchsafe(pos + 4);
+            frameFlags = buf.readUInt16BE(pos + 8);
+        }
+        const bodyStart = pos + headerLen;
+        const bodyEnd = bodyStart + frameSize;
+        if (frameSize <= 0 || bodyEnd > buf.length) {
+            break;
+        }
+        // 压缩/加密/分组帧无法直接解码文本，跳过
+        if (!(frameFlags & 0x00c0)) {
+            const body = buf.subarray(bodyStart, bodyEnd);
+            if (id === 'TXXX') {
+                // TXXX：描述 + 值，编码字节后是两个以 0 结尾的文本
+                const enc = body[0];
+                const rest = body.subarray(1);
+                const sepLen = enc === 1 || enc === 2 ? 2 : 1;
+                let sep = -1;
+                for (let i = 0; i + sepLen <= rest.length; i += sepLen) {
+                    if (rest[i] === 0 && (sepLen === 1 || rest[i + 1] === 0)) {
+                        sep = i;
+                        break;
+                    }
+                }
+                if (sep >= 0) {
+                    const desc = tidy(decodeFrameText(enc, rest.subarray(0, sep)));
+                    const value = tidy(decodeFrameText(enc, rest.subarray(sep + sepLen)));
+                    if (value) {
+                        tags.set(`TXXX:${desc.toUpperCase()}`, value);
+                    }
+                }
+            }
+            else if (id.startsWith('T') && id !== 'TXXX') {
+                const value = tidy(decodeFrameText(body[0], body.subarray(1)));
+                if (value) {
+                    tags.set(id, value);
+                }
+            }
+            else if (id === 'COMM' || id === 'COM') {
+                // 注释：编码字节 + 3 字节语言 + 描述(0 结尾) + 正文
+                const enc = body[0];
+                const sepLen = enc === 1 || enc === 2 ? 2 : 1;
+                const rest = body.subarray(4);
+                let sep = -1;
+                for (let i = 0; i + sepLen <= rest.length; i += sepLen) {
+                    if (rest[i] === 0 && (sepLen === 1 || rest[i + 1] === 0)) {
+                        sep = i;
+                        break;
+                    }
+                }
+                if (sep >= 0) {
+                    const value = tidy(decodeFrameText(enc, rest.subarray(sep + sepLen)));
+                    if (value) {
+                        tags.set('COMM', value);
+                    }
+                }
+            }
+        }
+        pos = bodyEnd;
+    }
+    // 音频数据从帧区域停止处开始（帧循环正常走完时即标签末尾）
+    return { tags, audioStart: pos, hasV2: true };
+}
+/** MPEG 版本/层 → 每帧采样数 */
+const SAMPLES_PER_FRAME = {
+    '1-1': 384,
+    '1-2': 1152,
+    '1-3': 1152,
+    '2-1': 384,
+    '2-2': 1152,
+    '2-3': 576,
+    '2.5-1': 384,
+    '2.5-2': 1152,
+    '2.5-3': 576,
+};
+const BITRATE_TABLE = {
+    '1-1': [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+    '1-2': [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+    '1-3': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    '2-1': [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+    '2-2': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    '2-3': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+};
+const SAMPLE_RATE_TABLE = {
+    '1': [44100, 48000, 32000],
+    '2': [22050, 24000, 16000],
+    '2.5': [11025, 12000, 8000],
+};
+const CHANNEL_MODES = ['立体声', '联合立体声', '双声道', '单声道'];
+/**
+ * 定位并解析第一帧音频头，逐帧统计时长。
+ * 时长按帧累加 samples/sampleRate 得到，VBR 文件同样正确。
+ */
+function readAudio(buf, start) {
+    let pos = start;
+    const end = buf.length;
+    while (pos + 4 <= end) {
+        // 帧同步：11 个 1
+        if (buf[pos] !== 0xff || (buf[pos + 1] & 0xe0) !== 0xe0) {
+            pos++;
+            continue;
+        }
+        const b1 = buf[pos + 1];
+        const b2 = buf[pos + 2];
+        const versionBits = (b1 & 0x18) >> 3;
+        const layerBits = (b1 & 0x06) >> 1;
+        if (versionBits === 1 || layerBits === 0) {
+            pos++; // 保留位，非法
+            continue;
+        }
+        const version = ['2.5', 'x', '2', '1'][versionBits];
+        const layer = [null, 3, 2, 1][layerBits];
+        const bitrateIdx = (b2 & 0xf0) >> 4;
+        const sampleRateIdx = (b2 & 0x0c) >> 2;
+        if (bitrateIdx === 0 || bitrateIdx === 15 || sampleRateIdx === 3) {
+            pos++;
+            continue;
+        }
+        const simpleVersion = version === '2.5' ? '2' : version;
+        const key = `${simpleVersion}-${layer}`;
+        const bitrate = BITRATE_TABLE[key]?.[bitrateIdx] ?? 0;
+        const sampleRate = SAMPLE_RATE_TABLE[version]?.[sampleRateIdx] ?? 0;
+        const samples = SAMPLES_PER_FRAME[key] ?? 0;
+        if (!bitrate || !sampleRate || !samples) {
+            pos++;
+            continue;
+        }
+        const padding = (b2 & 0x02) >> 1;
+        const frameSize = layer === 1
+            ? Math.floor((samples * bitrate * 125) / sampleRate + padding * 4)
+            : Math.floor((samples * bitrate * 125) / sampleRate + padding);
+        if (frameSize < 4) {
+            pos++;
+            continue;
+        }
+        // 找到首个合法帧：自此处逐帧遍历统计
+        const bitrateSet = new Set();
+        let durationMs = 0;
+        let cur = pos;
+        while (cur + 4 <= end) {
+            const c1 = buf[cur + 1];
+            const c2 = buf[cur + 2];
+            if (buf[cur] !== 0xff || (c1 & 0xe0) !== 0xe0) {
+                break; // 帧序列结束（遇到尾部的 ID3v1 或其他数据）
+            }
+            const cVersionBits = (c1 & 0x18) >> 3;
+            const cLayerBits = (c1 & 0x06) >> 1;
+            const cBitrateIdx = (c2 & 0xf0) >> 4;
+            const cSampleRateIdx = (c2 & 0x0c) >> 2;
+            if (cVersionBits === 1 || cLayerBits === 0 || cBitrateIdx === 0 || cBitrateIdx === 15 || cSampleRateIdx === 3) {
+                break;
+            }
+            const cVersion = ['2.5', 'x', '2', '1'][cVersionBits];
+            const cLayer = [null, 3, 2, 1][cLayerBits];
+            const cSimpleVersion = cVersion === '2.5' ? '2' : cVersion;
+            const cKey = `${cSimpleVersion}-${cLayer}`;
+            const cBitrate = BITRATE_TABLE[cKey]?.[cBitrateIdx] ?? 0;
+            const cSampleRate = SAMPLE_RATE_TABLE[cVersion]?.[cSampleRateIdx] ?? 0;
+            const cSamples = SAMPLES_PER_FRAME[cKey] ?? 0;
+            if (!cBitrate || !cSampleRate || !cSamples) {
+                break;
+            }
+            const cPadding = (c2 & 0x02) >> 1;
+            const cFrameSize = cLayer === 1
+                ? Math.floor((cSamples * cBitrate * 125) / cSampleRate + cPadding * 4)
+                : Math.floor((cSamples * cBitrate * 125) / cSampleRate + cPadding);
+            if (cFrameSize < 4) {
+                break;
+            }
+            bitrateSet.add(cBitrate);
+            durationMs += (cSamples / cSampleRate) * 1000;
+            cur += cFrameSize;
+        }
+        return {
+            bitrateKbps: bitrate,
+            sampleRate,
+            channels: CHANNEL_MODES[(buf[pos + 3] & 0xc0) >> 6],
+            durationMs,
+            bitrateSet,
+        };
+    }
+    return null;
+}
+/** 读取文件末尾 128 字节的 ID3v1 标签（无 ID3v2 时的兜底），文本按 UTF-8/GB18030 探测解码 */
+function readId3v1(buf) {
+    const tags = new Map();
+    if (buf.length < 128) {
+        return tags;
+    }
+    const tail = buf.subarray(buf.length - 128);
+    if (tail.toString('latin1', 0, 3) !== 'TAG') {
+        return tags;
+    }
+    const field = (start, len) => tidy(decodeText(tail.subarray(start, start + len)));
+    const title = field(3, 30);
+    const artist = field(33, 30);
+    const album = field(63, 30);
+    const year = field(93, 4);
+    if (title)
+        tags.set('TIT2', title);
+    if (artist)
+        tags.set('TPE1', artist);
+    if (album)
+        tags.set('TALB', album);
+    if (year)
+        tags.set('TYER', year);
+    const genreIdx = tail[127];
+    if (genreIdx !== 255) {
+        tags.set('TCON', ID3V1_GENRES[genreIdx] ?? String(genreIdx));
+    }
+    return tags;
+}
+/** ID3v1 流派编号表（0-79 为 ID3v1 标准，其后为 Winamp 扩展） */
+const ID3V1_GENRES = [
+    'Blues', 'Classic Rock', 'Country', 'Dance', 'Disco', 'Funk', 'Grunge', 'Hip-Hop',
+    'Jazz', 'Metal', 'New Age', 'Oldies', 'Other', 'Pop', 'R&B', 'Rap',
+    'Reggae', 'Rock', 'Techno', 'Industrial', 'Alternative', 'Ska', 'Death Metal', 'Pranks',
+    'Soundtrack', 'Euro-Techno', 'Ambient', 'Trip-Hop', 'Vocal', 'Jazz+Funk', 'Fusion', 'Trance',
+    'Classical', 'Instrumental', 'Acid', 'House', 'Game', 'Sound Clip', 'Gospel', 'Noise',
+    'AlternRock', 'Bass', 'Soul', 'Punk', 'Space', 'Meditative', 'Instrumental Pop', 'Instrumental Rock',
+    'Ethnic', 'Gothic', 'Darkwave', 'Techno-Industrial', 'Electronic', 'Pop-Folk', 'Eurodance', 'Dream',
+    'Southern Rock', 'Comedy', 'Cult', 'Gangsta', 'Top 40', 'Christian Rap', 'Pop/Funk', 'Jungle',
+    'Native American', 'Cabaret', 'New Wave', 'Psychadelic', 'Rave', 'Showtunes', 'Trailer', 'Lo-Fi',
+    'Tribal', 'Acid Punk', 'Acid Jazz', 'Polka', 'Retro', 'Musical', 'Rock & Roll', 'Hard Rock',
+];
+/**
+ * 把 TCON 里的流派编号换成流派名：支持 "17"、"(17)"，以及 v2.3 的连续形式 "(17)(20)"。
+ * 任一编号不在表内时保留原始文本。
+ */
+function normalizeGenre(raw) {
+    const parts = raw.match(/\(?\d{1,3}\)?/g);
+    if (!parts || parts.join('') !== raw) {
+        return raw; // 含非编号内容（如 "Rock"、"Rock/Pop"），原样返回
+    }
+    return parts
+        .map((p) => {
+        const idx = Number(p.replace(/[()]/g, ''));
+        return ID3V1_GENRES[idx] ?? p;
+    })
+        .join('/');
+}
+/** 格式化时长（毫秒 → mm:ss） */
+function formatDuration(ms) {
+    const totalSeconds = Math.round(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+/** 递归收集目录下所有 .mp3 文件的绝对路径 */
+function listMp3Files(root) {
+    const files = [];
+    const stack = [root];
+    while (stack.length > 0) {
+        const current = stack.pop();
+        let entries;
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true });
+        }
+        catch (err) {
+            console.warn(`无法读取目录: ${current} (${err.message})`);
+            continue;
+        }
+        for (const entry of entries) {
+            const full = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                stack.push(full);
+            }
+            else if (entry.isFile() && entry.name.toLowerCase().endsWith('.mp3')) {
+                files.push(full);
+            }
+        }
+    }
+    return files;
+}
+/** 解析单个 mp3 文件，返回其信息；文件无法读取或非合法 mp3 时返回 null */
+function readMp3(file, root) {
+    const buf = fs.readFileSync(file);
+    const v2 = readId3v2(buf);
+    const tags = v2.tags;
+    if (tags.size === 0) {
+        const v1 = readId3v1(buf);
+        if (v1.size > 0) {
+            for (const [k, v] of v1) {
+                if (!tags.has(k)) {
+                    tags.set(k, v);
+                }
+            }
+        }
+    }
+    const audio = readAudio(buf, v2.audioStart);
+    if (!audio) {
+        return null;
+    }
+    const genre = normalizeGenre(tags.get('TCON') ?? tags.get('TXXX:GENRE') ?? tags.get('TXXX:流派') ?? '');
+    const tag = (key) => truncate(tags.get(key) ?? '');
+    return {
+        name: path.basename(file),
+        path: path.relative(root, file),
+        size: xmcommon_1.utils.formatMemory(buf.length),
+        id3Version: v2.hasV2 ? `ID3v2.${buf[3]}` : tags.size > 0 ? 'ID3v1' : '无',
+        title: tag('TIT2'),
+        artist: tag('TPE1'),
+        album: tag('TALB'),
+        year: tag('TYER') || tag('TDRC'),
+        genre: truncate(genre),
+        bitrate: `${audio.bitrateKbps} kbps${audio.bitrateSet.size > 1 ? ' (VBR)' : ''}`,
+        duration: formatDuration(audio.durationMs),
+        sampleRate: `${audio.sampleRate} Hz`,
+        channel: audio.channels,
+    };
+}
+function main() {
+    const target = process.argv[2];
+    if (!target) {
+        console.error('用法: node mp3info.js <目录路径>');
+        process.exit(1);
+    }
+    const absTarget = path.resolve(target);
+    if (!fs.existsSync(absTarget) || !fs.statSync(absTarget).isDirectory()) {
+        console.error(`错误: 目录不存在或不是目录: ${absTarget}`);
+        process.exit(1);
+    }
+    const files = listMp3Files(absTarget).sort();
+    const infos = [];
+    const skipped = [];
+    for (const file of files) {
+        const rel = path.relative(absTarget, file);
+        try {
+            const info = readMp3(file, absTarget);
+            if (!info) {
+                console.warn(`跳过（未识别到音频帧）: ${rel}`);
+                skipped.push({ path: rel, reason: '未识别到合法的 MPEG 音频帧' });
+                continue;
+            }
+            infos.push(info);
+            console.log(`${info.path} | ${info.artist || '-'} - ${info.title || '-'} | ${info.bitrate} | ${info.duration}`);
+        }
+        catch (err) {
+            console.warn(`跳过（读取失败）: ${rel} (${err.message})`);
+            skipped.push({ path: rel, reason: `读取失败: ${err.message}` });
+        }
+    }
+    const result = {
+        path: absTarget,
+        files: infos,
+        skipped,
+        total: { fileCount: infos.length, skippedCount: skipped.length },
+    };
+    const outFile = path.resolve(`mp3info-result-${Date.now()}.json`);
+    fs.writeFileSync(outFile, JSON.stringify(result, null, 2), 'utf8');
+    console.log(`处理完成，共扫描 ${infos.length} 个，跳过 ${skipped.length} 个，结果已保存到: ${outFile}`);
+}
+main();
