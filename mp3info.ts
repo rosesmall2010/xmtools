@@ -432,7 +432,8 @@ function readId3v2(buf: Buffer): {
         }
         const bodyStart = pos + headerLen;
         const bodyEnd = bodyStart + frameSize;
-        if (frameSize <= 0 || bodyEnd > buf.length) {
+        // 零长帧是合法的（正文为空），保留帧头继续往后读；越界则说明帧区到此为止
+        if (bodyEnd > buf.length) {
             break;
         }
         // 压缩/加密/分组帧无法直接解码文本，跳过（原始字节仍保留）
@@ -874,26 +875,35 @@ function splitFrame(frame: Buffer): { id: string; body: Buffer } {
     return { id, body: frame.subarray(10) };
 }
 
-/** 按需转码的帧 → 新的 UTF-8 帧字节（返回 null 表示该帧应丢弃） */
-function rebuildFrame(id: string, body: Buffer, p: ParsedMp3): Buffer | null {
+/**
+ * 按需转码的帧 → 新的 UTF-8 帧字节。
+ * 解不出文本时（空值 / 工具不认识），退回按原字节保留而不是丢弃：宁可留一帧没转码的旧编码，
+ * 也不让标签内容凭空少一块。
+ */
+function rebuildFrame(id: string, body: Buffer, raw: Buffer, p: ParsedMp3): Buffer {
     if (id === 'TXXX') {
         const { id: desc, body: value } = splitTxxx(body, p);
-        return value ? buildTxxxFrame(desc, value) : null;
-    }
-    if (id === 'COMM' || id === 'COM') {
+        if (value) {
+            return buildTxxxFrame(desc, value);
+        }
+    } else if (id === 'COMM' || id === 'COM') {
         const text = p.tags.get('COMM');
-        return text ? buildCommFrame(text, p.commLang.get('COMM') ?? 'XXX') : null;
-    }
-    // v2.4 里年份统一写 TDRC，不再写 TYER
-    if (id === 'TYER' || id === 'TDRC') {
+        if (text) {
+            return buildCommFrame(text, p.commLang.get('COMM') ?? 'XXX');
+        }
+    } else if (id === 'TYER' || id === 'TDRC') {
+        // v2.4 里年份统一写 TDRC，不再写 TYER
         const year = p.tags.get('TYER') ?? p.tags.get('TDRC');
-        return year ? buildTextFrame('TDRC', year) : null;
+        if (year) {
+            return buildTextFrame('TDRC', year);
+        }
+    } else if (id[0] === 'T') {
+        const text = p.tags.get(id);
+        if (text) {
+            return buildTextFrame(id, text);
+        }
     }
-    if (id[0] !== 'T') {
-        return null;
-    }
-    const text = p.tags.get(id);
-    return text ? buildTextFrame(id, text) : null;
+    return reframeToV24(raw);
 }
 
 /**
@@ -940,11 +950,8 @@ function writeId3v24(file: string, p: ParsedMp3): void {
             emitted.add(id);
             continue;
         }
-        const rebuilt = rebuildFrame(id, body, p);
-        if (rebuilt) {
-            frames.push(rebuilt);
-            emitted.add(id);
-        }
+        frames.push(rebuildFrame(id, body, raw, p));
+        emitted.add(id);
     }
     // 只有 ID3v1 的文件：原标签没有任何帧可保留，用解码出的字段补出对应的 v2 帧
     const hasYear = emitted.has('TYER') || emitted.has('TDRC');
