@@ -13,7 +13,8 @@
  * 编码检测：ID3v2 文本帧带一个编码字节（0=ISO-8859-1、1=UTF-16 带 BOM、2=UTF-16BE、3=UTF-8），
  * 但历史上大量中文标签虽然声明 0（ISO-8859-1），实际写入的是 GBK/GB2312 字节。
  * 因此对非 ASCII 内容：先按严格 UTF-8 解码，失败则按 GB18030（兼容 GBK/GB2312）解码；
- * 若结果仍是乱码，再依次尝试还原「GBK 字节被当 ISO-8859-1」与「Big5 字节被当 GBK」两类乱码。
+ * 声明 UTF-8 却仍是「GBK 字节被当 ISO-8859-1」的乱码（如 `Ã«°¢Ãô`）时，再按 latin1→GBK 还原一次；
+ * 若结果仍是乱码，再依次尝试还原「Big5 字节被当 GBK」一类乱码。
  *
  * ID3v1 兜底：无 ID3v2 标签时读取文件末尾 128 字节的 TAG 块（同样按 UTF-8/GB18030 探测解码）。
  */
@@ -213,7 +214,12 @@ function repairBig5Mojibake(text: string): string {
 function decodeText(buf: Buffer): { text: string; enc: string } {
     const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
     try {
-        return { text: strictUtf8.decode(bytes), enc: 'utf8' };
+        const text = strictUtf8.decode(bytes);
+        // 声明 UTF-8 但实际塞的是「GBK 字节被当 ISO-8859-1」的乱码（如 `Ã«°¢Ãô`）：
+        // 严格 UTF-8 恰好能解出这些单字节西文字符，再按 latin1→GBK 还原一次。
+        // 正常中文/英文串还原结果不变或含 CJK 不达标，不会误伤。
+        const l1 = repairLatin1Mojibake(text);
+        return l1 === text ? { text, enc: 'utf8' } : { text: l1, enc: 'latin1乱码还原' };
     } catch {
         // gb18030 解码器遇非法字节不抛错，只吐 U+FFFD——故用解码结果 + 修复兜底
         const gb = gb18030.decode(bytes);
@@ -247,8 +253,9 @@ function decodeFrameText(encoding: number, body: Buffer): { text: string; enc: s
         return { text: body.swap16().toString('utf16le'), enc: 'utf16' };
     }
     if (encoding === 3) {
-        const d = decodeText(body);
-        return { text: d.text, enc: 'utf8' };
+        // 声明 UTF-8：交给 decodeText 探测（其内部同样会还原声明 UTF-8 却实为 latin1 乱码的情况，
+        // 并把还原结果标成 latin1乱码还原——不能强制标 utf8，否则 --update 不会写回这些文件）
+        return decodeText(body);
     }
     // encoding 0（含历史遗留的 GBK 误标）：走 UTF-8/GB18030 探测
     return decodeText(body);
